@@ -1,109 +1,84 @@
-def nextMove(g):
-    h,b = g.your_hole_cards,g.community_cards
-    call,pot,stack = max(0,g.amount_to_call),max(0,g.pot),max(0,g.your_stack)
-    r1,r2 = h[0][1],h[1][1]
+def nextMove(gameState):
+    call, pot, stack = gameState.amount_to_call, gameState.pot, gameState.your_stack
+    r1, r2 = gameState.your_hole_cards[0][1], gameState.your_hole_cards[1][1]
+    hi, lo = max(r1, r2), min(r1, r2)
+    is_pair = r1 == r2
+    suited = gameState.your_hole_cards[0][0] == gameState.your_hole_cards[1][0]
+    pot_odds = call / (pot + call) if call else 0
 
-    if g.street == "preflop":
-        hi,lo=max(r1,r2),min(r1,r2)
-        gap=hi-lo
-        s=hi*3+lo
+    def bet_size(frac, floor_frac):
+        return min(stack, max(int(pot * frac), int(stack * floor_frac), 1))
 
-        if r1==r2: s+=28+hi*2
-        if h[0][0]==h[1][0]: s+=6
-        if gap==1: s+=8
-        elif gap==2: s+=4
-        elif gap>=5: s-=5
-        if hi==14 and lo>=10: s+=12
-        elif hi>=12 and lo>=10: s+=7
+    if gameState.street == "preflop":
+        pts = {14: 10, 13: 8, 12: 7, 11: 6, 10: 5}.get(hi, hi / 2)
+        if is_pair:
+            pts = max(pts * 2, 5)
+        else:
+            pts += 2 if suited else 0
+            gap = hi - lo - 1
+            pts -= {0: 0, 1: 1, 2: 2, 3: 4}.get(gap, 5)
+            pts += 1 if gap <= 1 and hi < 12 else 0
 
-        if call==0:
-            if s>=85: return bet(g,pot,stack,.55)
-            if s>=68: return bet(g,pot,stack,.38)
-            if s>=56: return bet(g,pot,stack,.25)
-            return ("check",)
+        premium = pts >= 9
+        playable = pts >= 5
 
-        odds=call/max(1,pot+call)
-        if s>=88 or (s>=72 and odds<=.42) or (s>=60 and odds<=.27):
-            return ("call",)
-        return ("fold",)
+        if not playable:
+            return ("check",) if call == 0 else ("fold",)
+        if call == 0:
+            return ("bet", bet_size(1, 0.05 if premium else 0.025))
+        if premium and gameState.min_raise_to:
+            return ("raise", min(stack, max(gameState.min_raise_to, bet_size(1, 0.08))))
+        return ("call",) if premium or pot_odds <= 0.25 else ("fold",)
 
-    cards=h+b
-    cat=category(cards)
-    br=[x[1] for x in b]
-    top=max(br)
+    all_cards = gameState.your_hole_cards + gameState.community_cards
+    ranks = [c[1] for c in all_cards]
+    suits = [c[0] for c in all_cards]
+    board_ranks = [c[1] for c in gameState.community_cards]
+    counts = sorted((ranks.count(r) for r in set(ranks)), reverse=True)
+    suit_counts = {s: suits.count(s) for s in set(suits)}
 
-    overpair=r1==r2 and r1>top
-    top_pair=(r1==top or r2==top) and max(r1,r2)>=11
+    has_flush = any(n >= 5 for n in suit_counts.values())
+    flush_draw = not has_flush and any(n == 4 for n in suit_counts.values())
+    u = set(ranks) | ({1} if 14 in ranks else set())
+    windows = [set(range(s, s + 5)) for s in range(1, 11)]
+    has_straight = any(w <= u for w in windows)
+    straight_draw = not has_straight and any(len(w & u) == 4 for w in windows)
 
-    suits={}
-    ranks=set()
+    is_quads = counts[0] == 4
+    is_full_house = counts[0] == 3 and len(counts) > 1 and counts[1] >= 2
+    is_trips = counts[0] == 3
+    is_two_pair = counts[0] == 2 and len(counts) > 1 and counts[1] == 2
+    top_board = max(board_ranks)
+    top_pair = r1 == top_board or r2 == top_board
+    overpair = is_pair and r1 > top_board
+    matches_board = r1 in board_ranks or r2 in board_ranks
 
-    for s,r in cards:
-        suits[s]=suits.get(s,0)+1
-        ranks.add(r)
+    monster = has_straight or has_flush or is_full_house or is_quads or is_trips
+    strong = is_two_pair or overpair or top_pair
+    live_draw = (flush_draw or straight_draw) and gameState.street != "river"
+    weak_pair = (is_pair or matches_board) and not strong
 
-    flush_draw=len(b)<5 and 4 in suits.values()
-    straight_draw=len(b)<5 and draw(ranks)
-    strong_draw=flush_draw or straight_draw
+    if monster:
+        if call == 0:
+            return ("bet", bet_size(0.8, 0.08))
+        if gameState.min_raise_to:
+            size = stack if pot_odds < 0.4 else bet_size(1, 0.1)
+            return ("raise", min(stack, max(size, gameState.min_raise_to)))
+        return ("call",)
 
-    if call==0:
-        if cat>=6: return bet(g,pot,stack,.80)
-        if cat>=4: return bet(g,pot,stack,.65)
-        if cat>=2: return bet(g,pot,stack,.50)
-        if overpair or top_pair: return bet(g,pot,stack,.38)
-        if strong_draw: return bet(g,pot,stack,.30)
+    if strong:
+        if call == 0:
+            return ("bet", bet_size(0.65, 0.05))
+        return ("call",) if pot_odds <= 0.4 else ("fold",)
+
+    if live_draw or weak_pair:
+        if call == 0:
+            return ("bet", bet_size(0.4, 0.025))
+        return ("call",) if pot_odds <= 0.22 else ("fold",)
+
+    if call == 0:
+        scary = len(set(board_ranks)) == len(board_ranks) and top_board >= 12
+        if scary and stack > pot * 3:
+            return ("bet", bet_size(0.5, 0.03))
         return ("check",)
-
-    odds=call/max(1,pot+call)
-
-    if cat>=4: return ("call",)
-    if cat>=3 and odds<=.50: return ("call",)
-    if cat==2 and odds<=.40: return ("call",)
-    if overpair and odds<=.35: return ("call",)
-    if top_pair and odds<=.29: return ("call",)
-    if strong_draw and odds<=.26: return ("call",)
     return ("fold",)
-
-
-def category(cards):
-    counts,suits={},{}
-    for s,r in cards:
-        counts[r]=counts.get(r,0)+1
-        suits.setdefault(s,[]).append(r)
-
-    if any(len(x)>=5 and straight(x) for x in suits.values()): return 8
-
-    v=list(counts.values())
-    if 4 in v: return 7
-
-    trips=sum(x>=3 for x in v)
-    pairs=sum(x>=2 for x in v)
-
-    if trips>=2 or (trips and pairs>=2): return 6
-    if any(len(x)>=5 for x in suits.values()): return 5
-    if straight(counts): return 4
-    if trips: return 3
-    if pairs>=2: return 2
-    return 1 if pairs else 0
-
-
-def straight(ranks):
-    r=set(ranks)
-    if 14 in r: r.add(1)
-    return any(all(x in r for x in range(i,i+5)) for i in range(1,11))
-
-
-def draw(ranks):
-    r=set(ranks)
-    if 14 in r: r.add(1)
-    return any(len(r & set(range(i,i+5)))==4 for i in range(1,11))
-
-
-def bet(g,pot,stack,f):
-    if stack<=0: return ("check",)
-
-    lo=max(1,getattr(g,"min_bet",1))
-    hi=min(stack,getattr(g,"max_bet",stack))
-    amount=pot*f if pot else stack*.05
-
-    return ("bet",int(max(lo,min(amount,hi))))
